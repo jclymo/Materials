@@ -7,43 +7,34 @@ class z3ConstraintBuilder:
     self.solver = Solver()
     self.variables = {}
   
-  def _quantity_variables(self):
-    Quantities = self.variables.get('Quantities')
-    if Quantities is None:
-      Quantities = {f'{str(ion)}': Int(f'n_{str(ion)}') for ion in self.ions}
-      self.variables['Quantities'] = Quantities
-    return Quantities  
+  def _variables(self, var_name, var_type, ids):
+    local_variables = self.variables.get(var_name)
+    if local_variables is None:
+      local_variables = {str(idx): var_type(f'{var_name}_{str(idx)}') for idx in ids}
+      self.variables[var_name] = local_variables
+    return local_variables
+
+  def _species_quantity_variables(self):
+    return self._variables('Quantities', Int, self.ions)
   
   def _element_positive_variables(self):
-    Element_Positive = self.variables.get('Element_Positive')
-    if Element_Positive is None:
-      Element_Positive = {str(element): Bool(f'pos_{str(element)}') for element in self.elements}
-      self.variables['Element_Positive'] = Element_Positive
-    return Element_Positive
+    return self._variables('Element_Positive', Bool, self.elements)
 
   def _element_negative_variables(self):
-    Element_Negative = self.variables.get('Element_Negative')
-    if Element_Negative is None:
-      Element_Negative = {str(element): Bool(f'neg_{str(element)}') for element in self.elements}
-      self.variables['Element_Negative'] = Element_Negative
-    return Element_Negative
+    return self._variables('Element_Negative', Bool, self.elements)
   
   def _element_count_variables(self):
-    Element_Counts = self.variables.get('Element_Counts')
-    if Element_Counts is None:
-      Element_Counts = {str(element): Int(f'm_{str(element)}') for element in self.elements}
-      self.variables['Element_Counts'] = Element_Counts
-    return Element_Counts
+    return self._variables('Element_Count', Int, self.elements)    
        
   def non_negativity_constraints(self):
-    Quantities = self._quantity_variables() 
+    Quantities = self._species_quantity_variables() 
 
     self.solver.add(
       And([X >= 0 for X in Quantities.values()])
     )      
 
   def charge_constraints(self):        
-    Quantities = self._quantity_variables()
+    Quantities = self._species_quantity_variables()
 
     self.solver.add(
       Sum([Quantities[str(ion)]*int(ion.oxi_state) for ion in self.ions]) == 0
@@ -52,7 +43,7 @@ class z3ConstraintBuilder:
   def electronegativity_constraints(self):
     Element_Positive = self._element_positive_variables()
     Element_Negative = self._element_negative_variables()
-    Quantities = self._quantity_variables()
+    Quantities = self._species_quantity_variables()
 
     for ion in self.ions:
       if ion.oxi_state > 0:
@@ -82,7 +73,7 @@ class z3ConstraintBuilder:
         
     for element_1 in self.elements:
       for element_2 in self.elements:
-        # X is electronegativity (pymatgen)
+        # X is electronegativity
         if element_1.X < element_2.X:
           self.solver.add(
             Implies(
@@ -92,7 +83,7 @@ class z3ConstraintBuilder:
           )
 
   def element_quantity_constraints(self):
-    Quantities = self._quantity_variables()
+    Quantities = self._species_quantity_variables()
     Element_Counts = self._element_count_variables()
                 
     for element, count in self.element_quantities.items():
@@ -106,7 +97,7 @@ class z3ConstraintBuilder:
       )
 
   def exclude_solution(self, solution):
-    Quantities = self._quantity_variables()
+    Quantities = self._species_quantity_variables()
     for multiplier in range(1, self.n_atoms_upper_bound):
       exclusions = []
       for ion_id, quantity in solution.items():
@@ -118,26 +109,19 @@ class z3ConstraintBuilder:
 
 
 class z3ChargeForCompound(z3ConstraintBuilder):
-  def __init__(self, compound, permitted_oxi_states='common'):
+  def __init__(self, element_quantities, element_ions):
     super().__init__()
-    self._set_parameters(compound, permitted_oxi_states)
-    self._build_constraints()
+    
+    if any([n != int(n) for n in element_quantities.values()]):
+      raise Exception("Elements must have integer quantities.")
 
-  def _set_parameters(self, compound, permitted_oxi_states):
-    self.n_atoms_upper_bound = int(compound.num_atoms)
-
-    self.elements = compound.elements
-
-    self.element_quantities = dict(compound)
-
-    self.element_ions = {}
-    for element in self.elements:
-      if permitted_oxi_states == "all":
-        self.element_ions[element] = [pg.Species(element.symbol, ch) for ch in element.icsd_oxidation_states or element.oxidation_states]
-      elif permitted_oxi_states == "common":
-        self.element_ions[element] = [pg.Species(element.symbol, ch) for ch in element.common_oxidation_states]
-
+    self.element_quantities = {element: int(n) for element, n in element_quantities.items()}
+    self.elements = element_quantities.keys()
+    self.element_ions = element_ions
     self.ions = list(itertools.chain(*self.element_ions.values()))
+    self.n_atoms_upper_bound = sum(self.element_quantities.values())
+
+    self._build_constraints()
 
   def _build_constraints(self):
     self.non_negativity_constraints()
@@ -145,9 +129,9 @@ class z3ChargeForCompound(z3ConstraintBuilder):
     self.electronegativity_constraints()
     self.element_quantity_constraints()
     
-  def get_all(self, max_results = 100):
+  def get_all(self, max_results=100):
     solutions = []
-    Quantities = self._quantity_variables()
+    Quantities = self._species_quantity_variables()
     while self.solver.check() == sat and len(solutions) < max_results:
       model = self.solver.model()
       solution = {}
@@ -157,19 +141,6 @@ class z3ChargeForCompound(z3ConstraintBuilder):
       solutions.append(solution)
         
     return solutions
-
-
-def enumerate_and_print_oxidation_states(composition, permitted_oxidation_states=None):
-  c = pg.Composition(composition)
-  solutions = z3ChargeForCompound(c, permitted_oxidation_states).get_all()
-  if len(solutions) == 0:
-  	print("No solutions found.")
-  for i, solution in enumerate(solutions):
-    compact_solution = ', '.join([f'{id}: {num}' for id, num in solution.items() if num > 0])
-    print(f"({i}) {compact_solution}")
-
-
-
 
 
 
